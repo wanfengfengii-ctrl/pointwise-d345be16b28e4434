@@ -11,8 +11,9 @@ from delivery.outbox import Outbox
 from delivery.resend import ReplyLost, deliver
 from issuance.increment import issue_available_increments
 from issuance.subscriptions import open_source, subscribe
-from ledger.records import record
-from ledger.section_query import query_section_at
+from ledger.history import LedgerHistory
+from ledger.records import RecordRejected, record, record_work_order
+from ledger.section_query import SourcePositionRejected, query_section_at
 from replica.receive import open_replica
 from tests.support import reject_receiver_commit, totals, values
 
@@ -50,6 +51,69 @@ def install_v1(source, receiver):
     initial = subscribe(source, SUBSCRIPTION, REPLICA, EAST)
     require(send(source, receiver, initial).status, "applied")
     check_view(receiver, 2, EAST_AT_2)
+
+
+def install_east_at_two(source, receiver):
+    require(tuple(record(source, *operation) for operation in SEED), (1, 2))
+    initial = subscribe(source, SUBSCRIPTION, REPLICA, EAST)
+    require(send(source, receiver, initial).status, "applied")
+    check_view(receiver, 2, EAST_AT_2)
+
+
+def observe_work_order(source, receiver):
+    install_east_at_two(source, receiver)
+    require(record_work_order(source, WORK_ORDER), (3, 4, 5))
+    for position in (3, 4):
+        try:
+            query_section_at(source, position, EAST)
+        except SourcePositionRejected:
+            continue
+        raise AssertionError(f"work order interior {position} was queryable")
+    (unit,) = issue_available_increments(source, SUBSCRIPTION)
+    require((unit.kind, unit.position, unit.payload["last_position"]), ("work_order", 3, 5))
+    require("W" in unit.payload_json, False)
+    before = read(receiver, REPLICA)
+    require((before.position, totals(before)), (2, (("east", 2, 1, 5),)))
+    require(send(source, receiver, unit).status, "applied")
+    completed = check_view(receiver, 5, EAST_AT_5)
+    require(totals(completed), (("east", 2, 0, 12),))
+    require(values(query_section_at(source, 5, EAST).rows), values(completed.rows))
+    print(f"Work order held as one unit: {before.position} -> {completed.position}"
+          f" {values(completed.rows)}")
+
+
+def observe_follow_up_orders(source, receiver):
+    install_east_at_two(source, receiver)
+    require(record_work_order(source, WORK_ORDER), (3, 4, 5))
+    (unit,) = issue_available_increments(source, SUBSCRIPTION)
+    require(send(source, receiver, unit).status, "applied")
+    baseline = read(receiver, REPLICA)
+    require(record_work_order(source, WEST_ONLY), (6, 7))
+    (west_unit,) = issue_available_increments(source, SUBSCRIPTION)
+    require([step["operation"] for step in west_unit.payload["steps"]], ["progress", "progress"])
+    require(send(source, receiver, west_unit).status, "applied")
+    after = read(receiver, REPLICA)
+    require((after.position, values(after.rows)), (7, values(baseline.rows)))
+    try:
+        record_work_order(source, INVALID_ORDER)
+    except RecordRejected:
+        pass
+    else:
+        raise AssertionError("invalid work order was accepted")
+    require(LedgerHistory(source).head_position(), 7)
+    require(values(query_section_at(source, 5, EAST).rows), EAST_AT_5)
+    print(f"Follow-up west-only order kept east rows at {after.position}")
+
+
+def observe_crossing_order(source, receiver):
+    install_east_at_two(source, receiver)
+    require(record_work_order(source, RETURN_TO_EAST), (3, 4))
+    (unit,) = issue_available_increments(source, SUBSCRIPTION)
+    require([step["operation"] for step in unit.payload["steps"]], ["delete", "upsert"])
+    require(send(source, receiver, unit).status, "applied")
+    report = check_view(receiver, 4, (("E", "east", 5, 4), ("F", "east", None, 2)))
+    require(totals(report), (("east", 2, 1, 5),))
+    print(f"Round-trip order kept values with E source {report.rows[0].source_position}")
 
 
 def observe_v1(source, receiver):
@@ -117,6 +181,32 @@ def exercise_legacy(root):
     print(f"V1 in-flight ledger: {completed.position} {values(completed.rows)}")
 
 
+def exercise_upgrade(root):
+    source_path, receiver_path = root / "upgrade-source.sqlite", root / "upgrade-replica.sqlite"
+    with closing(open_source(source_path)) as source, closing(open_replica(receiver_path)) as receiver:
+        earlier, later = seed_legacy(source, receiver)
+        require(send(source, receiver, later).status, "waiting")
+    with closing(open_source(source_path)) as source, closing(open_replica(receiver_path)) as receiver:
+        require(pending(source), (earlier, later))
+        require(record_work_order(source, WORK_ORDER), (5, 6, 7))
+        (unit,) = issue_available_increments(source, SUBSCRIPTION)
+        require((unit.kind, unit.position, unit.payload["last_position"]), ("work_order", 5, 7))
+        require(send(source, receiver, unit).status, "waiting")
+        check_view(receiver, 2, EAST_AT_2)
+        require(pending(source), (earlier, later, unit))
+        require(send(source, receiver, earlier).status, "applied")
+        completed = check_view(receiver, 7, (("E", "east", 6, 3), ("G", "east", 7, 7),
+                                             ("Z", "east", 0, 4)))
+        require(totals(completed), (("east", 3, 0, 13),))
+        for piece in (earlier, later, unit):
+            replay = send(source, receiver, piece)
+            require((replay.position, replay.status), (piece.position, "applied"))
+            require(send(source, receiver, piece), replay)
+        require(pending(source), ())
+        require(read(receiver, REPLICA), completed)
+    print(f"V1 then work order upgrade: {completed.position} {values(completed.rows)}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run the V1 comparison or save two V1 databases with old pieces in flight."
@@ -136,6 +226,11 @@ def main():
         observe_v1(source, receiver)
     with TemporaryDirectory() as directory:
         exercise_legacy(Path(directory))
+    for observe in (observe_work_order, observe_follow_up_orders, observe_crossing_order):
+        with closing(open_source(":memory:")) as source, closing(open_replica(":memory:")) as receiver:
+            observe(source, receiver)
+    with TemporaryDirectory() as directory:
+        exercise_upgrade(Path(directory))
 
 
 if __name__ == "__main__":

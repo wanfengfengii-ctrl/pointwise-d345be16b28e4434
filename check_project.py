@@ -1,4 +1,5 @@
-"""Run this project's full unittest suite from the repository root."""
+"""Run this project's full unittest suite and the linkage checks from the repository root."""
+import subprocess
 import sys
 import unittest
 
@@ -23,7 +24,10 @@ def main():
           f'expected_failures={len(result.expectedFailures)} '
           f'unexpected_successes={len(result.unexpectedSuccesses)} '
           f'result={"PASS" if successful else "FAIL"}')
-    return 0 if successful else 1
+    linkage = subprocess.run([sys.executable, '-B', 'work_order_cases.py'], check=False)
+    if linkage.returncode != 0:
+        print(f'LINKAGE CASES FAILED exit={linkage.returncode}')
+    return 0 if successful and linkage.returncode == 0 else 1
 
 
 if __name__ == '__main__':

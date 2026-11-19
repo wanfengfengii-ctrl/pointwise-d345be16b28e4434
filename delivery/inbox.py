@@ -26,7 +26,7 @@ class Inbox:
         self.db.execute('''
             CREATE INDEX IF NOT EXISTS inbox_waiting_delta
             ON inbox(replica_id, subscription_id, scope_version, position)
-            WHERE kind = 'delta' AND status = 'waiting'
+            WHERE kind IN ('delta', 'work_order') AND status = 'waiting'
         ''')
 
     def stage(self, envelope: Envelope) -> str:
@@ -50,7 +50,8 @@ class Inbox:
                 position: int) -> Envelope | None:
         row = self.db.execute('''
             SELECT body FROM inbox WHERE replica_id = ? AND subscription_id = ?
-            AND scope_version = ? AND position = ? AND kind = 'delta' AND status = 'waiting'
+            AND scope_version = ? AND position = ? AND kind IN ('delta', 'work_order')
+            AND status = 'waiting'
         ''', (replica_id, subscription_id, scope_version, position)).fetchone()
         return None if row is None else decode_envelope(row[0])
 
@@ -75,5 +76,5 @@ class Inbox:
     def retire_scope(self, replica_id: str, subscription_id: str, active_version: int) -> None:
         self.db.execute('''
             UPDATE inbox SET status = 'retired' WHERE replica_id = ? AND subscription_id = ?
-            AND scope_version < ? AND kind = 'delta' AND status = 'waiting'
+            AND scope_version < ? AND kind IN ('delta', 'work_order') AND status = 'waiting'
         ''', (replica_id, subscription_id, active_version))

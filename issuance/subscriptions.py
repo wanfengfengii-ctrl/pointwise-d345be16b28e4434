@@ -77,6 +77,15 @@ class SubscriptionStore:
         if result.rowcount != 1:
             raise SubscriptionRejected('issuance cursor changed or is not consecutive')
 
+    def advance_cursor(self, subscription_id: str, scope_version: int, prior: int,
+                       position: int) -> None:
+        result = self.db.execute('''
+            UPDATE subscriptions SET cursor = ? WHERE subscription_id = ?
+            AND scope_version = ? AND cursor = ?
+        ''', (position, subscription_id, scope_version, prior))
+        if result.rowcount != 1:
+            raise SubscriptionRejected('issuance cursor changed or is not consecutive')
+
     def set_scope(self, subscription_id: str, prior_version: int, scope: tuple[str, ...],
                   cut_position: int) -> None:
         result = self.db.execute('''

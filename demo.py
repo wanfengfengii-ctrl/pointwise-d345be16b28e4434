@@ -10,7 +10,7 @@ from delivery.resend import ReplyLost, deliver
 from delivery.runner import forward_pending_scope_request
 from issuance.increment import issue_available_increments
 from issuance.subscriptions import open_source, subscribe
-from ledger.records import record
+from ledger.records import record, record_work_order
 from replica.receive import open_replica
 from replica.scope_request import change_scope
 
@@ -45,6 +45,52 @@ def _scene(case_id, inputs, expected, actual, downstream_expected, downstream_ac
         'code_paths': paths,
         'oracle': oracle,
     }, ensure_ascii=False, sort_keys=True))
+
+
+def run_work_order(source, receiver):
+    """Hand one composite correction order over as an indivisible audit unit."""
+    record(source, 'register', 'E', 'east', 5)
+    record(source, 'register', 'F', 'east', None)
+    initial = subscribe(source, SUBSCRIPTION, REPLICA, ['east'])
+    _send(source, receiver, initial)
+    positions = record_work_order(source, [('withdraw', 'F'), ('register', 'W', 'west', 17),
+                                           ('register', 'G', 'east', 7)])
+    _require(positions, (3, 4, 5))
+    (unit,) = issue_available_increments(source, SUBSCRIPTION)
+    _require((unit.kind, unit.position, unit.payload['last_position']), ('work_order', 3, 5))
+    held = read(receiver, REPLICA)
+    _require((held.position, _values(held)), (2, [['E', 5], ['F', None]]))
+    print('Held work order at source boundary 3..5; replica still reads position '
+          f'{held.position}: {_values(held)}')
+    _scene('v2-held', {'order': [[3, 'withdraw F'], [4, 'west W=17'], [5, 'east G=7']],
+                       'east_replica_at': 2},
+           {'position': 2, 'rows': [['E', 5], ['F', None]]},
+           {'position': held.position, 'rows': _values(held)},
+           [['E', 5], ['F', None]], _values(held),
+           ['ledger/records.py', 'issuance/increment.py', 'audit/details.py'],
+           'A work order is one audit boundary, so the replica keeps its old complete view.')
+    _send(source, receiver, unit)
+    finished = read(receiver, REPLICA)
+    observed = [[row.section, row.records, row.missing, row.reading_sum] for row in finished.totals]
+    print('POINTWISE_SCENARIO ' + json.dumps({
+        'case_id': 'v2-delivered',
+        'input': {'order': [[3, 'withdraw F'], [4, 'west W=17'], [5, 'east G=7']]},
+        'expected': {'position': 5, 'rows': [['E', 5], ['G', 7]], 'totals': [['east', 2, 0, 12]]},
+        'actual': {'position': finished.position, 'rows': _values(finished)},
+        'downstream_expected': [['east', 2, 0, 12]],
+        'downstream_actual': observed,
+        'code_paths': ['issuance/increment.py', 'replica/increment_apply.py', 'audit/totals.py'],
+        'oracle': 'Withdrawing the missing row and adding G raises the sum from 5 to 12.',
+    }, ensure_ascii=False, sort_keys=True))
+    print(export_details(finished), end='')
+    print(export_totals(finished), end='')
+    record_work_order(source, [('correct', 'W', 'west', 19), ('register', 'X', 'west', 0)])
+    (west_only,) = issue_available_increments(source, SUBSCRIPTION)
+    _require([step['operation'] for step in west_only.payload['steps']], ['progress', 'progress'])
+    _send(source, receiver, west_only)
+    after_west = read(receiver, REPLICA)
+    _require((after_west.position, _values(after_west)), (7, [['E', 5], ['G', 7]]))
+    print(f'West-only order advanced the boundary to {after_west.position} without new east text')
 
 
 def run_workday(source, receiver):
@@ -116,6 +162,9 @@ def run_workday(source, receiver):
 def main():
     with TemporaryDirectory() as directory:
         root = Path(directory)
+        with closing(open_source(root / 'order-source.sqlite')) as source, \
+                closing(open_replica(root / 'work-order.sqlite')) as order_receiver:
+            run_work_order(source, order_receiver)
         with closing(open_source(root / 'source.sqlite')) as source:
             replica_path = root / 'replica.sqlite'
             with closing(open_replica(replica_path)) as receiver:

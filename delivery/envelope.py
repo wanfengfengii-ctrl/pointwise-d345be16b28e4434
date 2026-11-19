@@ -53,7 +53,7 @@ def make_envelope(subscription_id: str, replica_id: str, scope_version: int,
         raise EnvelopeRejected('invalid scope version')
     if type(position) is not int or not 0 <= position < 2**63:
         raise EnvelopeRejected('invalid envelope position')
-    if kind not in ('initial', 'delta', 'cutover') or not isinstance(payload, dict):
+    if kind not in ('initial', 'delta', 'cutover', 'work_order') or not isinstance(payload, dict):
         raise EnvelopeRejected('invalid envelope kind or payload')
     identity = _canonical([subscription_id, scope_version, kind, position])
     number = hashlib.sha256(identity.encode('ascii')).hexdigest()

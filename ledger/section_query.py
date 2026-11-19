@@ -22,6 +22,9 @@ def query_section_at(source: sqlite3.Connection, position: int,
     history = LedgerHistory(source)
     if type(position) is not int or not 0 <= position <= history.head_position():
         raise SourcePositionRejected(f'no committed source position: {position!r}')
+    if history.is_work_order_interior(position):
+        raise SourcePositionRejected(
+            f'work order interior position is not an audit boundary: {position}')
     scope = normalize_scope(sections)
     rows = tuple(row for row in history.rows_at(position) if row.section in scope)
     return SectionSnapshot(position, scope, rows)

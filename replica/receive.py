@@ -36,7 +36,7 @@ def accept_envelope(receiver: sqlite3.Connection, replica_id: str,
             if envelope.kind == 'initial':
                 apply_initial_snapshot(store, envelope)
                 inbox.finish(envelope.envelope_id, 'applied')
-            elif envelope.kind == 'delta':
+            elif envelope.kind in ('delta', 'work_order'):
                 apply_increment(store, inbox, envelope)
             else:
                 activate_scope(store, inbox, envelope)

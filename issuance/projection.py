@@ -1,27 +1,28 @@
-from dataclasses import dataclass
-
 from ledger.history import FactEvent, Observation
 
 
-@dataclass(frozen=True)
-class ScopeDelta:
-    operation: str
-    observation_id: str | None = None
-    row: Observation | None = None
-
-    def to_payload(self) -> dict:
-        if self.row is not None:
-            return {'operation': self.operation, 'row': self.row.to_payload()}
-        if self.observation_id is not None:
-            return {'operation': self.operation, 'observation_id': self.observation_id}
-        return {'operation': self.operation}
-
-
 def project_fact_change(scope: tuple[str, ...], before: Observation | None,
-                        event: FactEvent) -> ScopeDelta:
+                        event: FactEvent) -> dict:
+    """Render one source fact as a scope-local delta payload object."""
     after = event.observation()
     if after is not None and after.section in scope:
-        return ScopeDelta('upsert', row=after)
+        return {'operation': 'upsert', 'row': after.to_payload()}
     if before is not None and before.section in scope:
-        return ScopeDelta('delete', observation_id=event.observation_id)
-    return ScopeDelta('progress')
+        return {'operation': 'delete', 'observation_id': event.observation_id}
+    return {'operation': 'progress'}
+
+
+def project_unit_steps(scope: tuple[str, ...], events: tuple[FactEvent, ...],
+                       history) -> list[dict]:
+    """Project every fact of one unit, each tagged with its original source position.
+
+    A work order is one audit boundary but still keeps each fact's own position and
+    scope-local projection, so nothing in the unit's interior is ever a readable
+    cross-section and out-of-scope text never leaves the source.
+    """
+    steps = []
+    for event in events:
+        before = history.observation_at(event.observation_id, event.position - 1)
+        delta = project_fact_change(scope, before, event)
+        steps.append({'source_position': event.position, **delta})
+    return steps

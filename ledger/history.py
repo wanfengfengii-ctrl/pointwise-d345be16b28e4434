@@ -93,9 +93,32 @@ class LedgerHistory:
         self.db.execute('''
             CREATE INDEX IF NOT EXISTS facts_by_observation ON facts(observation_id, position)
         ''')
+        self.db.execute('''
+            CREATE TABLE IF NOT EXISTS work_orders (
+                first_position INTEGER PRIMARY KEY,
+                last_position INTEGER NOT NULL UNIQUE,
+                CHECK (last_position >= first_position)
+            )
+        ''')
 
     def head_position(self) -> int:
         return self.db.execute('SELECT coalesce(max(position), 0) FROM facts').fetchone()[0]
+
+    def work_order_bounds(self, position: int) -> tuple[int, int] | None:
+        row = self.db.execute('''
+            SELECT first_position, last_position FROM work_orders
+            WHERE first_position <= ? AND last_position >= ? LIMIT 1
+        ''', (position, position)).fetchone()
+        return None if row is None else (row[0], row[1])
+
+    def is_work_order_interior(self, position: int) -> bool:
+        bounds = self.work_order_bounds(position)
+        return bounds is not None and bounds[0] <= position < bounds[1]
+
+    def record_work_order(self, first: int, last: int) -> None:
+        self.db.execute('''
+            INSERT INTO work_orders(first_position, last_position) VALUES (?, ?)
+        ''', (first, last))
 
     def append(self, operation: str, observation_id: str, section: str | None,
                reading: int | None) -> int:
